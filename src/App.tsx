@@ -1,241 +1,318 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
+import { useMemo, useState } from 'react';
+import { GoogleGenAI } from '@google/genai';
+import { motion } from 'motion/react';
+import {
+  BookOpen,
+  Brain,
+  FileQuestion,
+  FolderPlus,
+  LayoutDashboard,
+  Loader2,
+  Plus,
+  Sparkles,
+  Upload,
+  Download,
+} from 'lucide-react';
 
-import { useState, useRef } from 'react';
-import { GoogleGenAI } from "@google/genai";
-import { motion, AnimatePresence } from 'motion/react';
-import { Languages, Link, Send, Loader2, AlertCircle, Copy, Check, ArrowRight } from 'lucide-react';
-import Markdown from 'react-markdown';
-
-// Initialize Gemini API
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
+type Task = { id: string; title: string; done: boolean };
+type SubjectFolder = { id: string; name: string; tasks: Task[] };
+type Flashcard = { id: string; question: string; answer: string };
+
 export default function App() {
-  const [url, setUrl] = useState('');
-  const [translation, setTranslation] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  const resultRef = useRef<HTMLDivElement>(null);
+  const [activePhase, setActivePhase] = useState<1 | 2 | 3 | 4>(1);
 
-  const handleTranslate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!url.trim()) return;
+  // Phase 1 state
+  const [subjects, setSubjects] = useState<SubjectFolder[]>([]);
+  const [subjectName, setSubjectName] = useState('');
+  const [selectedSubjectId, setSelectedSubjectId] = useState<string>('');
+  const [taskTitle, setTaskTitle] = useState('');
 
-    // Basic URL validation
-    try {
-      new URL(url);
-    } catch (err) {
-      setError('الرجاء إدخال رابط صحيح (URL)');
-      return;
-    }
+  // Phase 2 state
+  const [flashcards, setFlashcards] = useState<Flashcard[]>([]);
+  const [question, setQuestion] = useState('');
+  const [answer, setAnswer] = useState('');
+  const [revealedCardId, setRevealedCardId] = useState<string | null>(null);
 
-    setIsLoading(true);
-    setError(null);
-    setTranslation('');
+  // Phase 3 state
+  const [mindMapLoading, setMindMapLoading] = useState(false);
+  const [mindMapText, setMindMapText] = useState('');
+  const [mindMapError, setMindMapError] = useState<string | null>(null);
 
-    try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
-        contents: `قم بترجمة **كامل** محتوى المقال الموجود في هذا الرابط ترجمة كاملة وشاملة إلى اللغة العربية: ${url}. 
-        **تحذير هام جداً:** لا تقم باختصار النص أو تلخيصه أو حذف أي جزء منه أبداً. يجب ترجمة كل فقرة وكل جملة وكل كلمة موجودة في المقال الأصلي دون أي نقص، مهما كان طول المقال. 
-        حافظ على التنسيق الأصلي (عناوين، فقرات، قوائم) باستخدام Markdown بشكل احترافي.`,
-        config: {
-          tools: [{ urlContext: {} }],
-          systemInstruction: "أنت مترجم محترف فائق الدقة والأمانة. مهمتك هي ترجمة المقالات ترجمة كاملة (Full Translation) من البداية إلى النهاية دون حذف أي جزء أو تلخيص أي فقرة. يجب أن تكون الترجمة مطابقة تماماً للمحتوى الأصلي من حيث الطول والتفاصيل، مع صياغتها بأسلوب عربي بليغ وسلس. يمنع منعاً باتاً التلخيص أو الاختصار.",
+  // Phase 4 state
+  const [quizLoading, setQuizLoading] = useState(false);
+  const [quizText, setQuizText] = useState('');
+  const [quizError, setQuizError] = useState<string | null>(null);
+
+  const selectedSubject = useMemo(
+    () => subjects.find((s) => s.id === selectedSubjectId),
+    [subjects, selectedSubjectId],
+  );
+
+  const addSubject = () => {
+    if (!subjectName.trim()) return;
+    const newSubject: SubjectFolder = {
+      id: crypto.randomUUID(),
+      name: subjectName.trim(),
+      tasks: [],
+    };
+    setSubjects((prev) => [...prev, newSubject]);
+    setSelectedSubjectId(newSubject.id);
+    setSubjectName('');
+  };
+
+  const addTask = () => {
+    if (!selectedSubjectId || !taskTitle.trim()) return;
+    setSubjects((prev) =>
+      prev.map((subject) =>
+        subject.id === selectedSubjectId
+          ? {
+              ...subject,
+              tasks: [
+                ...subject.tasks,
+                { id: crypto.randomUUID(), title: taskTitle.trim(), done: false },
+              ],
+            }
+          : subject,
+      ),
+    );
+    setTaskTitle('');
+  };
+
+  const toggleTask = (subjectId: string, taskId: string) => {
+    setSubjects((prev) =>
+      prev.map((subject) =>
+        subject.id === subjectId
+          ? {
+              ...subject,
+              tasks: subject.tasks.map((task) =>
+                task.id === taskId ? { ...task, done: !task.done } : task,
+              ),
+            }
+          : subject,
+      ),
+    );
+  };
+
+  const addFlashcard = () => {
+    if (!question.trim() || !answer.trim()) return;
+    setFlashcards((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), question: question.trim(), answer: answer.trim() },
+    ]);
+    setQuestion('');
+    setAnswer('');
+  };
+
+  const readFileAsBase64 = (file: File) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = reader.result?.toString();
+        if (!result) return reject(new Error('تعذر قراءة الملف.'));
+        resolve(result.split(',')[1]);
+      };
+      reader.onerror = () => reject(new Error('فشل في قراءة الملف.'));
+      reader.readAsDataURL(file);
+    });
+
+  const generateFromPdf = async (
+    file: File,
+    mode: 'mindmap' | 'quiz',
+  ) => {
+    const base64 = await readFileAsBase64(file);
+    const prompt =
+      mode === 'mindmap'
+        ? `حوّل ملف PDF كامل إلى خريطة ذهنية احترافية باللغة العربية بصيغة Markdown منظمة جداً.
+- لا تختصر المحتوى بشكل مخل.
+- استخرج كل الأفكار الأساسية والفرعية والمفاهيم المهمة.
+- استخدم بنية هرمية واضحة (عنوان رئيسي > محاور > نقاط فرعية عميقة).
+- أضف أمثلة/تعريفات مهمة من الملف عندما تكون موجودة.
+- في النهاية أضف قسم "ملخص شامل" يغطي كل النقاط.`
+        : `حوّل ملف PDF كامل إلى بنك أسئلة احترافي باللغة العربية.
+- أنشئ 20 سؤال اختيار من متعدد على الأقل (A/B/C/D).
+- الأسئلة تكون متنوعة بين الفهم، التحليل، التطبيق.
+- أضف الإجابة الصحيحة مع تفسير مختصر بعد كل سؤال.
+- لا تعتمد على كلمتين من الملف فقط، بل غطِّ المحتوى بشكل واسع.`;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-pro',
+      contents: [
+        {
+          inlineData: { mimeType: 'application/pdf', data: base64 },
         },
-      });
+        { text: prompt },
+      ],
+    });
 
-      const text = response.text;
-      if (text) {
-        setTranslation(text);
-        // Scroll to result after a short delay to allow rendering
-        setTimeout(() => {
-          resultRef.current?.scrollIntoView({ behavior: 'smooth' });
-        }, 100);
-      } else {
-        throw new Error('لم يتم استلام أي محتوى من الذكاء الاصطناعي.');
-      }
-    } catch (err: any) {
-      console.error('Translation error:', err);
-      setError(err.message || 'حدث خطأ أثناء محاولة ترجمة المقال. يرجى التأكد من أن الرابط متاح للعامة.');
+    return response.text ?? '';
+  };
+
+  const onMindMapUpload = async (file: File | null) => {
+    if (!file) return;
+    setMindMapLoading(true);
+    setMindMapError(null);
+    setMindMapText('');
+    try {
+      const text = await generateFromPdf(file, 'mindmap');
+      if (!text.trim()) throw new Error('لم يتم إنتاج خريطة ذهنية.');
+      setMindMapText(text);
+    } catch (error: any) {
+      setMindMapError(error.message ?? 'حدث خطأ أثناء تحويل الملف.');
     } finally {
-      setIsLoading(false);
+      setMindMapLoading(false);
     }
   };
 
-  const copyToClipboard = () => {
-    navigator.clipboard.writeText(translation);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  const onQuizUpload = async (file: File | null) => {
+    if (!file) return;
+    setQuizLoading(true);
+    setQuizError(null);
+    setQuizText('');
+    try {
+      const text = await generateFromPdf(file, 'quiz');
+      if (!text.trim()) throw new Error('لم يتم إنتاج الأسئلة.');
+      setQuizText(text);
+    } catch (error: any) {
+      setQuizError(error.message ?? 'حدث خطأ أثناء توليد الأسئلة.');
+    } finally {
+      setQuizLoading(false);
+    }
+  };
+
+  const downloadAsPngNote = () => {
+    alert('لتحويل الخريطة إلى PNG بدقة عالية: انسخ المحتوى واعرضه في أداة رسم خرائط ذهنية مثل Excalidraw أو Canva ثم قم بالتصدير PNG.');
   };
 
   return (
-    <div className="min-h-screen bg-[#f8f9fa] text-[#1a1a1a] font-sans selection:bg-indigo-100" dir="rtl">
-      {/* Header */}
-      <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
-        <div className="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="bg-indigo-600 p-2 rounded-lg">
-              <Languages className="text-white w-5 h-5" />
-            </div>
-            <h1 className="text-xl font-bold tracking-tight text-gray-900">مترجم المقالات الذكي</h1>
-          </div>
-          <div className="text-sm text-gray-500 font-medium hidden sm:block">
-            ترجمة دقيقة مدعومة بالذكاء الاصطناعي
-          </div>
+    <div className="min-h-screen bg-slate-950 text-slate-100" dir="rtl">
+      <header className="sticky top-0 z-10 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4">
+          <h1 className="flex items-center gap-2 text-xl font-bold">
+            <LayoutDashboard className="h-5 w-5 text-cyan-400" />
+            منصة الدراسة الذكية
+          </h1>
+          <span className="text-sm text-slate-400">تصميم احترافي • 4 مراحل</span>
         </div>
       </header>
 
-      <main className="max-w-4xl mx-auto px-4 py-12">
-        {/* Hero Section */}
-        <div className="text-center mb-12">
-          <motion.h2 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="text-4xl font-extrabold text-gray-900 mb-4 leading-tight"
-          >
-            ترجم أي مقال بضغطة واحدة
-          </motion.h2>
-          <motion.p 
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.1 }}
-            className="text-lg text-gray-600 max-w-2xl mx-auto"
-          >
-            ضع رابط المقال الطويل وسنقوم بترجمته لك بدقة احترافية مع الحفاظ على التنسيق الأصلي.
-          </motion.p>
-        </div>
-
-        {/* Input Form */}
-        <motion.div 
-          initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
-          transition={{ delay: 0.2 }}
-          className="bg-white rounded-2xl shadow-sm border border-gray-200 p-6 mb-12"
-        >
-          <form onSubmit={handleTranslate} className="space-y-4">
-            <div className="relative">
-              <div className="absolute inset-y-0 right-0 pr-4 flex items-center pointer-events-none">
-                <Link className="h-5 w-5 text-gray-400" />
-              </div>
-              <input
-                type="text"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="أدخل رابط المقال هنا (مثال: https://example.com/article)"
-                className="block w-full pr-12 pl-4 py-4 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all outline-none text-lg"
-                disabled={isLoading}
-              />
-            </div>
+      <main className="mx-auto max-w-6xl px-4 py-8">
+        <div className="mb-8 grid gap-3 sm:grid-cols-4">
+          {[
+            { id: 1 as const, label: 'المرحلة 1', icon: BookOpen },
+            { id: 2 as const, label: 'المرحلة 2', icon: Brain },
+            { id: 3 as const, label: 'المرحلة 3', icon: Sparkles },
+            { id: 4 as const, label: 'المرحلة 4', icon: FileQuestion },
+          ].map((phase) => (
             <button
-              type="submit"
-              disabled={isLoading || !url.trim()}
-              className={`w-full py-4 px-6 rounded-xl font-bold text-lg flex items-center justify-center gap-2 transition-all ${
-                isLoading || !url.trim() 
-                ? 'bg-gray-200 text-gray-400 cursor-not-allowed' 
-                : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-200 active:scale-[0.98]'
+              key={phase.id}
+              onClick={() => setActivePhase(phase.id)}
+              className={`rounded-xl border p-4 text-right transition ${
+                activePhase === phase.id
+                  ? 'border-cyan-400 bg-cyan-400/10'
+                  : 'border-slate-800 bg-slate-900 hover:border-slate-600'
               }`}
             >
-              {isLoading ? (
-                <>
-                  <Loader2 className="w-6 h-6 animate-spin" />
-                  جاري التحليل والترجمة...
-                </>
-              ) : (
-                <>
-                  <Send className="w-5 h-5 rotate-180" />
-                  ابدأ الترجمة الآن
-                </>
-              )}
+              <phase.icon className="mb-2 h-5 w-5 text-cyan-400" />
+              <p className="font-semibold">{phase.label}</p>
             </button>
-          </form>
+          ))}
+        </div>
 
-          {error && (
-            <motion.div 
-              initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: 'auto' }}
-              className="mt-4 p-4 bg-red-50 border border-red-100 rounded-xl flex items-start gap-3 text-red-700"
-            >
-              <AlertCircle className="w-5 h-5 mt-0.5 flex-shrink-0" />
-              <p className="text-sm font-medium">{error}</p>
-            </motion.div>
-          )}
-        </motion.div>
-
-        {/* Results Section */}
-        <AnimatePresence>
-          {translation && (
-            <motion.div 
-              ref={resultRef}
-              initial={{ opacity: 0, y: 40 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 20 }}
-              className="bg-white rounded-2xl shadow-md border border-gray-200 overflow-hidden"
-            >
-              <div className="bg-gray-50 px-6 py-4 border-b border-gray-200 flex items-center justify-between">
-                <div className="flex items-center gap-2 text-gray-700 font-bold">
-                  <Languages className="w-5 h-5 text-indigo-600" />
-                  المقال المترجم
+        {activePhase === 1 && (
+          <motion.section initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
+            <h2 className="text-2xl font-bold">إدارة المهام حسب المادة</h2>
+            <div className="grid gap-6 md:grid-cols-2">
+              <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
+                <h3 className="mb-3 flex items-center gap-2 font-semibold"><FolderPlus className="h-4 w-4" /> إنشاء مجلد مادة</h3>
+                <div className="flex gap-2">
+                  <input value={subjectName} onChange={(e) => setSubjectName(e.target.value)} placeholder="مثال: الفيزياء" className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2" />
+                  <button onClick={addSubject} className="rounded-lg bg-cyan-500 px-4 py-2 font-semibold text-slate-950"><Plus /></button>
                 </div>
-                <button 
-                  onClick={copyToClipboard}
-                  className="flex items-center gap-1.5 text-sm font-medium text-gray-500 hover:text-indigo-600 transition-colors"
-                >
-                  {copied ? (
-                    <>
-                      <Check className="w-4 h-4 text-green-500" />
-                      تم النسخ
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-4 h-4" />
-                      نسخ النص
-                    </>
-                  )}
+              </div>
+
+              <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
+                <h3 className="mb-3 font-semibold">إضافة مهمة للمادة</h3>
+                <select value={selectedSubjectId} onChange={(e) => setSelectedSubjectId(e.target.value)} className="mb-2 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2">
+                  <option value="">اختر المادة</option>
+                  {subjects.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+                <div className="flex gap-2">
+                  <input value={taskTitle} onChange={(e) => setTaskTitle(e.target.value)} placeholder="مثال: حل واجب الفصل الثالث" className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2" />
+                  <button onClick={addTask} className="rounded-lg bg-cyan-500 px-4 py-2 font-semibold text-slate-950">إضافة</button>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
+              <h3 className="mb-4 font-semibold">قائمة المهام</h3>
+              {!selectedSubject ? <p className="text-slate-400">اختر مادة لعرض المهام.</p> : (
+                <ul className="space-y-2">
+                  {selectedSubject.tasks.map((t) => (
+                    <li key={t.id} className="flex items-center gap-3 rounded-lg border border-slate-700 p-3">
+                      <input type="checkbox" checked={t.done} onChange={() => toggleTask(selectedSubject.id, t.id)} />
+                      <span className={t.done ? 'line-through text-slate-500' : ''}>{t.title}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </motion.section>
+        )}
+
+        {activePhase === 2 && (
+          <section className="space-y-6">
+            <h2 className="text-2xl font-bold">الفلاش كاردز</h2>
+            <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5">
+              <div className="grid gap-2 md:grid-cols-2">
+                <input value={question} onChange={(e) => setQuestion(e.target.value)} placeholder="السؤال" className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2" />
+                <input value={answer} onChange={(e) => setAnswer(e.target.value)} placeholder="الإجابة" className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2" />
+              </div>
+              <button onClick={addFlashcard} className="mt-3 rounded-lg bg-cyan-500 px-4 py-2 font-semibold text-slate-950">إضافة كارت</button>
+            </div>
+            <div className="grid gap-3 md:grid-cols-2">
+              {flashcards.map((card) => (
+                <button key={card.id} onClick={() => setRevealedCardId(revealedCardId === card.id ? null : card.id)} className="rounded-xl border border-slate-700 bg-slate-900 p-4 text-right">
+                  <p className="font-semibold text-cyan-300">س: {card.question}</p>
+                  {revealedCardId === card.id && <p className="mt-2 text-slate-200">ج: {card.answer}</p>}
                 </button>
-              </div>
-              <div className="p-8 prose prose-indigo max-w-none prose-headings:text-gray-900 prose-p:text-gray-700 prose-p:leading-relaxed prose-a:text-indigo-600">
-                <div className="markdown-body">
-                  <Markdown>{translation}</Markdown>
-                </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+              ))}
+            </div>
+          </section>
+        )}
 
-        {/* Features/Info */}
-        {!translation && !isLoading && (
-          <div className="grid sm:grid-cols-3 gap-6 mt-12">
-            {[
-              { title: 'ترجمة سياقية', desc: 'لا نكتفي بالترجمة الحرفية، بل نفهم المعنى الحقيقي للمقال.' },
-              { title: 'دعم المقالات الطويلة', desc: 'يمكننا معالجة المقالات والتقارير الطويلة جداً بكفاءة.' },
-              { title: 'تنسيق ذكي', desc: 'نحافظ على العناوين والفقرات والقوائم كما هي في الأصل.' }
-            ].map((feature, i) => (
-              <motion.div 
-                key={i}
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.4 + (i * 0.1) }}
-                className="bg-white p-6 rounded-xl border border-gray-100 text-center"
-              >
-                <div className="w-10 h-10 bg-indigo-50 rounded-full flex items-center justify-center mx-auto mb-4">
-                  <ArrowRight className="w-5 h-5 text-indigo-600 rotate-180" />
-                </div>
-                <h3 className="font-bold text-gray-900 mb-2">{feature.title}</h3>
-                <p className="text-sm text-gray-500">{feature.desc}</p>
-              </motion.div>
-            ))}
-          </div>
+        {activePhase === 3 && (
+          <section className="space-y-6">
+            <h2 className="text-2xl font-bold">تحويل PDF إلى خريطة ذهنية احترافية</h2>
+            <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-dashed border-slate-600 bg-slate-900 p-4">
+              <Upload className="h-5 w-5 text-cyan-400" /> ارفع ملف PDF
+              <input type="file" accept="application/pdf" className="hidden" onChange={(e) => onMindMapUpload(e.target.files?.[0] ?? null)} />
+            </label>
+            {mindMapLoading && <p className="flex items-center gap-2 text-cyan-300"><Loader2 className="h-4 w-4 animate-spin" />جاري إنشاء الخريطة...</p>}
+            {mindMapError && <p className="text-red-400">{mindMapError}</p>}
+            {mindMapText && (
+              <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5 whitespace-pre-wrap">
+                <button onClick={downloadAsPngNote} className="mb-4 flex items-center gap-2 rounded-lg bg-cyan-500 px-4 py-2 font-semibold text-slate-950"><Download className="h-4 w-4" />تحميل PNG</button>
+                {mindMapText}
+              </div>
+            )}
+          </section>
+        )}
+
+        {activePhase === 4 && (
+          <section className="space-y-6">
+            <h2 className="text-2xl font-bold">تحويل PDF إلى أسئلة اختيار من متعدد</h2>
+            <label className="flex cursor-pointer items-center gap-2 rounded-xl border border-dashed border-slate-600 bg-slate-900 p-4">
+              <Upload className="h-5 w-5 text-cyan-400" /> ارفع ملف PDF
+              <input type="file" accept="application/pdf" className="hidden" onChange={(e) => onQuizUpload(e.target.files?.[0] ?? null)} />
+            </label>
+            {quizLoading && <p className="flex items-center gap-2 text-cyan-300"><Loader2 className="h-4 w-4 animate-spin" />جاري إنشاء الأسئلة...</p>}
+            {quizError && <p className="text-red-400">{quizError}</p>}
+            {quizText && <div className="rounded-2xl border border-slate-800 bg-slate-900 p-5 whitespace-pre-wrap">{quizText}</div>}
+          </section>
         )}
       </main>
-
-      {/* Footer */}
-      <footer className="py-8 text-center text-gray-400 text-sm border-t border-gray-100 mt-12">
-        &copy; {new Date().getFullYear()} مترجم المقالات الذكي. جميع الحقوق محفوظة.
-      </footer>
     </div>
   );
 }
